@@ -7,49 +7,41 @@
 #include <sys/mman.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <stdio.h>  // For tempnam
 
-// Forward declarations of mechanism-specific functions
-// Shared Memory (shm_mutex.c)
+// Forward declarations
 IPC_Handle init_shm(const IPC_Config *config);
 int ipc_send_shm(IPC_Handle handle, const void *data, size_t len);
 int ipc_recv_shm(IPC_Handle handle, void *buf, size_t len);
 void close_shm(IPC_Handle handle);
 
-// POSIX Message Queue (msg_queue.c)
 #ifdef __linux__
 IPC_Handle init_mq_posix(const IPC_Config *config);
 int ipc_send_mq_posix(IPC_Handle handle, const void *data, size_t len);
 int ipc_recv_mq_posix(IPC_Handle handle, void *buf, size_t len);
 void close_mq_posix(IPC_Handle handle);
-#endif
 
-// System V Message Queue (msg_queue.c)
-#ifdef __linux__
 IPC_Handle init_mq_sysv(const IPC_Config *config);
 int ipc_send_mq_sysv(IPC_Handle handle, const void *data, size_t len);
 int ipc_recv_mq_sysv(IPC_Handle handle, void *buf, size_t len);
 void close_mq_sysv(IPC_Handle handle);
 #endif
 
-// Named Pipe (pipes.c)
 IPC_Handle init_pipe_named(const IPC_Config *config);
 int ipc_send_pipe_named(IPC_Handle handle, const void *data, size_t len);
 int ipc_recv_pipe_named(IPC_Handle handle, void *buf, size_t len);
 void close_pipe_named(IPC_Handle handle);
 
-// Unnamed Pipe (pipes.c)
 IPC_Handle init_pipe_unnamed(const IPC_Config *config);
 int ipc_send_pipe_unnamed(IPC_Handle handle, const void *data, size_t len);
 int ipc_recv_pipe_unnamed(IPC_Handle handle, void *buf, size_t len);
 void close_pipe_unnamed(IPC_Handle handle);
 
-// Unix Domain Socket (sockets.c)
 IPC_Handle init_socket_unix(const IPC_Config *config);
 int ipc_send_socket_unix(IPC_Handle handle, const void *data, size_t len);
 int ipc_recv_socket_unix(IPC_Handle handle, void *buf, size_t len);
 void close_socket_unix(IPC_Handle handle);
 
-// TCP/IP Socket (sockets.c)
 IPC_Handle init_socket_tcp(const IPC_Config *config);
 int ipc_send_socket_tcp(IPC_Handle handle, const void *data, size_t len);
 int ipc_recv_socket_tcp(IPC_Handle handle, void *buf, size_t len);
@@ -118,7 +110,7 @@ IPC_Handle ipc_init(const IPC_Config *config) {
     return core_h;
 }
 
-// Send data via the appropriate mechanism
+// Send data
 int ipc_send(IPC_Handle handle, const void *data, size_t len) {
     if (!handle || !data || len == 0) {
         errno = EINVAL;
@@ -149,7 +141,7 @@ int ipc_send(IPC_Handle handle, const void *data, size_t len) {
     }
 }
 
-// Receive data via the appropriate mechanism
+// Receive data
 int ipc_recv(IPC_Handle handle, void *buf, size_t len) {
     if (!handle || !buf || len == 0) {
         errno = EINVAL;
@@ -180,7 +172,7 @@ int ipc_recv(IPC_Handle handle, void *buf, size_t len) {
     }
 }
 
-// Close and cleanup IPC resources
+// Close and cleanup
 void ipc_close(IPC_Handle handle) {
     if (!handle) return;
 
@@ -210,39 +202,49 @@ void ipc_close(IPC_Handle handle) {
             close_socket_tcp(core_h->mech_handle);
             break;
         default:
-            break; // No action for invalid mechanism
+            break;
     }
     free(core_h);
 }
 
-// Mutex implementation (process-shared via shared memory)
+// Mutex implementation
 typedef struct {
     pthread_mutex_t *mutex;
     void *shm;
     size_t shm_size;
+    char *shm_name;
 } IPC_Mutex_Internal;
 
 IPC_Mutex* ipc_mutex_create(void) {
     IPC_Mutex_Internal *mux = malloc(sizeof(IPC_Mutex_Internal));
     if (!mux) return NULL;
 
-    // Use unique shm name to avoid conflicts
-    int fd = shm_open("/ipc_mutex_XXXXXX", O_CREAT | O_RDWR, 0600);
+    char *name = tempnam(NULL, "ipc_mux");
+    if (!name) {
+        free(mux);
+        return NULL;
+    }
+    mux->shm_name = name;
+
+    int fd = shm_open(mux->shm_name, O_CREAT | O_RDWR | O_EXCL, 0600);
     if (fd == -1) {
+        free(mux->shm_name);
         free(mux);
         return NULL;
     }
     mux->shm_size = sizeof(pthread_mutex_t);
     if (ftruncate(fd, mux->shm_size) == -1) {
         close(fd);
-        shm_unlink("/ipc_mutex_XXXXXX");
+        shm_unlink(mux->shm_name);
+        free(mux->shm_name);
         free(mux);
         return NULL;
     }
     mux->shm = mmap(NULL, mux->shm_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     close(fd);
     if (mux->shm == MAP_FAILED) {
-        shm_unlink("/ipc_mutex_XXXXXX");
+        shm_unlink(mux->shm_name);
+        free(mux->shm_name);
         free(mux);
         return NULL;
     }
@@ -270,11 +272,12 @@ void ipc_mutex_destroy(IPC_Mutex *mux) {
     IPC_Mutex_Internal *m = (IPC_Mutex_Internal *)mux;
     pthread_mutex_destroy(m->mutex);
     munmap(m->shm, m->shm_size);
-    shm_unlink("/ipc_mutex_XXXXXX");
+    shm_unlink(m->shm_name);
+    free(m->shm_name);
     free(m);
 }
 
-// Semaphore implementation (POSIX, process-shared)
+// Semaphore implementation
 typedef struct {
     sem_t *sem;
     char *name;
@@ -284,8 +287,14 @@ IPC_Sem* ipc_sem_create(int initial_value) {
     IPC_Sem_Internal *sem = malloc(sizeof(IPC_Sem_Internal));
     if (!sem) return NULL;
 
-    sem->name = strdup("/ipc_sem_XXXXXX");
-    sem->sem = sem_open(sem->name, O_CREAT, 0600, initial_value);
+    char *name = tempnam(NULL, "ipc_sem");
+    if (!name) {
+        free(sem);
+        return NULL;
+    }
+    sem->name = name;
+
+    sem->sem = sem_open(sem->name, O_CREAT | O_EXCL, 0600, initial_value);
     if (sem->sem == SEM_FAILED) {
         free(sem->name);
         free(sem);

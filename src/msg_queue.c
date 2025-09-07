@@ -4,38 +4,31 @@
 #include <string.h>
 
 #ifdef __linux__
-#include <mqueue.h>     // For POSIX message queues
-#include <sys/msg.h>    // For System V message queues
-#endif
+#include <mqueue.h>
+#include <sys/msg.h>
 
-// POSIX Message Queue Handle
 typedef struct {
-#ifdef __linux__
     mqd_t mq;
-#else
-    void *dummy; // Placeholder for macOS
-#endif
+    char *mq_name;
 } MqPosixHandle;
 
-// System V Message Queue Handle
 typedef struct {
-#ifdef __linux__
     int msqid;
-#else
-    void *dummy; // Placeholder for macOS
-#endif
 } MqSysvHandle;
 
-#ifdef __linux__
-// POSIX Message Queue Implementation
 IPC_Handle init_mq_posix(const IPC_Config *config) {
     struct mq_attr attr = {
-        .mq_maxmsg = 10,          // Max number of messages
-        .mq_msgsize = config->size // Max message size
+        .mq_maxmsg = 10,
+        .mq_msgsize = config->size
     };
-    mqd_t mq = mq_open(config->name, O_CREAT | O_RDWR, 0666, &attr);
+    mqd_t mq = mq_open(config->name, O_CREAT | O_RDWR | O_EXCL, 0666, &attr);
     if (mq == (mqd_t)-1) {
-        return NULL;
+        if (errno == EEXIST) {
+            mq = mq_open(config->name, O_RDWR);
+            if (mq == (mqd_t)-1) return NULL;
+        } else {
+            return NULL;
+        }
     }
 
     MqPosixHandle *h = malloc(sizeof(MqPosixHandle));
@@ -45,6 +38,13 @@ IPC_Handle init_mq_posix(const IPC_Config *config) {
         return NULL;
     }
     h->mq = mq;
+    h->mq_name = strdup(config->name);
+    if (!h->mq_name) {
+        free(h);
+        mq_close(mq);
+        mq_unlink(config->name);
+        return NULL;
+    }
     return (IPC_Handle)h;
 }
 
@@ -54,7 +54,7 @@ int ipc_send_mq_posix(IPC_Handle handle, const void *data, size_t len) {
         errno = EINVAL;
         return -1;
     }
-    return mq_send(h->mq, data, len, 0); // Priority 0
+    return mq_send(h->mq, data, len, 0);
 }
 
 int ipc_recv_mq_posix(IPC_Handle handle, void *buf, size_t len) {
@@ -70,14 +70,14 @@ void close_mq_posix(IPC_Handle handle) {
     MqPosixHandle *h = (MqPosixHandle *)handle;
     if (!h) return;
     mq_close(h->mq);
-    mq_unlink(((IPC_Config *)/*from init*/)->name); // Note: Requires config; see below
+    mq_unlink(h->mq_name);
+    free(h->mq_name);
     free(h);
 }
 
-// System V Message Queue Implementation
 typedef struct {
-    long mtype; // Message type (required by System V)
-    char mtext[1]; // Flexible array for data
+    long mtype;
+    char mtext[1];
 } SysvMsg;
 
 IPC_Handle init_mq_sysv(const IPC_Config *config) {
@@ -110,7 +110,7 @@ int ipc_send_mq_sysv(IPC_Handle handle, const void *data, size_t len) {
         errno = ENOMEM;
         return -1;
     }
-    msg->mtype = 1; // Default message type
+    msg->mtype = 1;
     memcpy(msg->mtext, data, len);
     int ret = msgsnd(h->msqid, msg, len, 0);
     free(msg);
@@ -143,42 +143,14 @@ void close_mq_sysv(IPC_Handle handle) {
     free(h);
 }
 
-#else // macOS or other non-Linux platforms
-IPC_Handle init_mq_posix(const IPC_Config *config) {
-    errno = ENOTSUP;
-    return NULL;
-}
+#else // macOS or other non-Linux
+IPC_Handle init_mq_posix(const IPC_Config *config) { errno = ENOTSUP; return NULL; }
+int ipc_send_mq_posix(IPC_Handle handle, const void *data, size_t len) { errno = ENOTSUP; return -1; }
+int ipc_recv_mq_posix(IPC_Handle handle, void *buf, size_t len) { errno = ENOTSUP; return -1; }
+void close_mq_posix(IPC_Handle handle) {}
 
-int ipc_send_mq_posix(IPC_Handle handle, const void *data, size_t len) {
-    errno = ENOTSUP;
-    return -1;
-}
-
-int ipc_recv_mq_posix(IPC_Handle handle, void *buf, size_t len) {
-    errno = ENOTSUP;
-    return -1;
-}
-
-void close_mq_posix(IPC_Handle handle) {
-    // No-op
-}
-
-IPC_Handle init_mq_sysv(const IPC_Config *config) {
-    errno = ENOTSUP;
-    return NULL;
-}
-
-int ipc_send_mq_sysv(IPC_Handle handle, const void *data, size_t len) {
-    errno = ENOTSUP;
-    return -1;
-}
-
-int ipc_recv_mq_sysv(IPC_Handle handle, void *buf, size_t len) {
-    errno = ENOTSUP;
-    return -1;
-}
-
-void close_mq_sysv(IPC_Handle handle) {
-    // No-op
-}
+IPC_Handle init_mq_sysv(const IPC_Config *config) { errno = ENOTSUP; return NULL; }
+int ipc_send_mq_sysv(IPC_Handle handle, const void *data, size_t len) { errno = ENOTSUP; return -1; }
+int ipc_recv_mq_sysv(IPC_Handle handle, void *buf, size_t len) { errno = ENOTSUP; return -1; }
+void close_mq_sysv(IPC_Handle handle) {}
 #endif

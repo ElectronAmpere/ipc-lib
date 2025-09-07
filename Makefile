@@ -1,10 +1,14 @@
-CC = clang
+CC = gcc
 CFLAGS = -Wall -Wextra -O2 -fPIC -Iinclude
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Linux)
+    CC = gcc
     LDFLAGS = -shared -lpthread -lrt
-else
+else ifeq ($(UNAME_S),Darwin)
+    CC = clang
     LDFLAGS = -shared -lpthread
+else
+    $(error Unsupported OS: $(UNAME_S))
 endif
 
 SRCS = src/ipc_core.c src/shm_mutex.c src/msg_queue.c src/pipes.c src/sockets.c
